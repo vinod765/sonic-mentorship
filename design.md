@@ -165,10 +165,7 @@ def render(template_name: str, vendor: str, device_profile: str) -> str:
     return template.render(**context)
 ```
 
-Plugs into the existing `sonic-cfggen` pipeline — doesn't replace anything, just feeds the right context in.
-
----
-
+ 
 ## Migration Phases
 
 | Filename | Copies | What Changes | Phase |
