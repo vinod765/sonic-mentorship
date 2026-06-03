@@ -29,17 +29,12 @@ sonic-buildimage/
 │   │       └── override.json
 │   └── ...
 │
-└── templates/
-    ├── base_defaults.json                     ← repo-wide fallback values
-    └── base/
-        ├── buffers.json.j2
-        ├── buffers_defaults_t0.j2
-        ├── buffers_defaults_t1.j2
-        ├── buffers_defaults_t2.j2
-        ├── buffers_defaults_def_lossy.j2
-        ├── buffers_dynamic.json.j2
-        ├── buffer_ports.j2
-        └── buffer_ports_t0.j2
+├── files/
+│   ├── build_templates/
+│   │   ├── base_defaults.json                ← repo-wide fallback values
+│   │   └── buffers.json.j2                   ← base templates live here
+│   └── build_scripts/
+│       └── render_template.py                ← render script lives here
 ```
 
 Device directories no longer contain `.j2` files — only `override.json`.
@@ -51,7 +46,7 @@ Device directories no longer contain `.j2` files — only `override.json`.
 Context is built by merging three JSON layers, last one wins:
 
 ```
-Level 1 — templates/base_defaults.json             (repo-wide fallbacks)
+Level 1 — base_defaults.json                       (repo-wide fallbacks)
            +
 Level 2 — device/<vendor>/vendor_defaults.json     (vendor-wide values)
            +
@@ -70,7 +65,7 @@ If a device is identical to vendor defaults, `override.json` can be empty or ski
 
 ## JSON Examples
 
-**`templates/base_defaults.json`**
+**`files/build_templates/base_defaults.json`** — repo-wide fallbacks, every key has a safe default:
 ```json
 {
   "default_topo": "t0",
@@ -82,7 +77,7 @@ If a device is identical to vendor defaults, `override.json` can be empty or ski
 }
 ```
 
-**`device/mellanox/vendor_defaults.json`**
+**`device/mellanox/vendor_defaults.json`** — Mellanox chips use dynamic buffering and larger pool sizes across all their devices, so these live at vendor level instead of repeating in every device:
 ```json
 {
   "default_topo": "t1",
@@ -91,37 +86,77 @@ If a device is identical to vendor defaults, `override.json` can be empty or ski
 }
 ```
 
-**`device/mellanox/x86_64-mlnx_msn2700-r0/override.json`**
+**`device/mellanox/x86_64-mlnx_msn2700-r0/override.json`** — SN2700 is a 32-port device, which differs from other Mellanox devices, so only that goes here:
 ```json
 {
-  "port_count": 32,
-  "ingress_lossless_pool_size": "20971328"
+  "port_count": 32
 }
 ```
+
+**Final merged context for `x86_64-mlnx_msn2700-r0`:**
+```json
+{
+  "default_topo": "t1",
+  "buffer_mode": "dynamic",
+  "ingress_lossless_pool_size": "20971328",
+  "egress_lossless_pool_size": "16777152",
+  "port_count": 32,
+  "port_range_start": 0
+}
+```
+
+`default_topo`, `buffer_mode`, `ingress_lossless_pool_size` → from Level 2 (Mellanox vendor), overrides base.  
+`port_count` → from Level 3 (device), overrides vendor.  
+`egress_lossless_pool_size`, `port_range_start` → from Level 1 (base), no one overrode them.
 
 ---
 
 ## Template — Before and After
 
-**Before:**
+**Before (current state — hardcoded per device):**
 ```jinja2
-{%- set default_topo = 't0' %}
+{%- set default_topo = 't1' %}
+{%- set buffer_mode = 'dynamic' %}
 ```
 
-**After:**
+**After (reads from merged context):**
 ```jinja2
 {%- set default_topo = device.default_topo | default('t0') %}
 {%- set buffer_mode = device.buffer_mode | default('static') %}
 ```
 
-The `| default()` filter means if nothing is passed, the template still renders fine.
+The `| default()` filter means if nothing is passed, the template still renders fine using the base fallback value.
+
+**How the vendor-level value reaches the template — Mellanox example:**
+
+`device/mellanox/vendor_defaults.json` has:
+```json
+{
+  "default_topo": "t1",
+  "buffer_mode": "dynamic"
+}
+```
+
+After deep_merge, the render context becomes:
+```python
+device.default_topo = "t1"   ← from vendor_defaults.json (Level 2)
+device.buffer_mode  = "dynamic"  ← from vendor_defaults.json (Level 2)
+```
+
+Template renders as:
+```jinja2
+{%- set default_topo = 't1' %}
+{%- set buffer_mode = 'dynamic' %}
+```
+
+Same output as before — but now `t1` comes from `vendor_defaults.json` once, not hardcoded into 200+ individual device files.
 
 ---
 
 ## Render Script
 
 ```python
-# tools/render_template.py
+# files/build_scripts/render_template.py
 import json
 import os
 from jinja2 import Environment, FileSystemLoader
@@ -138,7 +173,7 @@ def deep_merge(base: dict, override: dict) -> dict:
 def build_context(vendor: str, device_profile: str) -> dict:
     repo_root = os.path.dirname(os.path.dirname(__file__))
 
-    with open(os.path.join(repo_root, "templates", "base_defaults.json")) as f:
+    with open(os.path.join(repo_root, "files", "build_templates", "base_defaults.json")) as f:
         context = json.load(f)
 
     vendor_path = os.path.join(repo_root, "device", vendor, "vendor_defaults.json")
@@ -156,7 +191,7 @@ def build_context(vendor: str, device_profile: str) -> dict:
 def render(template_name: str, vendor: str, device_profile: str) -> str:
     repo_root = os.path.dirname(os.path.dirname(__file__))
     env = Environment(
-        loader=FileSystemLoader(os.path.join(repo_root, "templates", "base")),
+        loader=FileSystemLoader(os.path.join(repo_root, "files", "build_templates")),
         trim_blocks=True,
         lstrip_blocks=True
     )
@@ -165,7 +200,8 @@ def render(template_name: str, vendor: str, device_profile: str) -> str:
     return template.render(**context)
 ```
 
- 
+---
+
 ## Migration Phases
 
 | Filename | Copies | What Changes | Phase |
@@ -184,8 +220,8 @@ def render(template_name: str, vendor: str, device_profile: str) -> str:
 | Remaining 39 variant filenames | small counts | Varies | 4 |
 
 **Phase 1 — `buffers.json.j2`**
-- One base template, `default_topo` moves to per-device `override.json`
-- Sets up the full infrastructure — `templates/base/`, `base_defaults.json`, render script, JSON hierarchy
+- One base template in `files/build_templates/`, `default_topo` moves to per-device `override.json`
+- Sets up the full infrastructure — base template, `base_defaults.json`, render script, JSON hierarchy
 - Validate by diffing render output against the current file for each device
 - ~214 files removed
 
